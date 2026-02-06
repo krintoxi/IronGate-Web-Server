@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>IronGate Web Server — Operator Guide</title>
+
+<style>
+:root {
+  --bg: #0b0f0c;
+  --panel: #0f1612;
+  --green: #00ff88;
+  --cyan: #00eaff;
+  --red: #ff3b3b;
+  --dim: #7a8f85;
+  --border: #1e3a2f;
+  --glow: 0 0 15px rgba(0,255,136,0.2);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: radial-gradient(circle at top, #0f1a14, var(--bg));
+  color: var(--green);
+  font-family: "Courier New", monospace;
+}
+
+header {
+  padding: 20px;
+  border-bottom: 1px solid var(--border);
+  background: #0c120f;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 2rem;
+  text-shadow: var(--glow);
+}
+
+header span {
+  color: var(--dim);
+  font-size: 0.9rem;
+}
+
+.container {
+  max-width: 1100px;
+  margin: auto;
+  padding: 25px 20px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: var(--glow);
+  padding: 20px;
+  margin-bottom: 25px;
+}
+
+.panel h2 {
+  margin-top: 0;
+  color: var(--cyan);
+}
+
+.panel h3 {
+  margin-bottom: 8px;
+  color: #9ef0ff;
+}
+
+.panel p, .panel li {
+  color: #cde6dc;
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+code {
+  background: #050807;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  color: var(--cyan);
+}
+
+pre {
+  background: #050807;
+  padding: 15px;
+  border: 1px solid var(--border);
+  overflow-x: auto;
+  color: var(--green);
+}
+
+ul {
+  padding-left: 18px;
+}
+
+.badge {
+  display: inline-block;
+  padding: 4px 8px;
+  margin-right: 6px;
+  margin-bottom: 6px;
+  border: 1px solid var(--border);
+  font-size: 0.75rem;
+  color: var(--cyan);
+  background: #08100c;
+}
+
+a {
+  color: var(--cyan);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+footer {
+  text-align: center;
+  padding: 20px;
+  border-top: 1px solid var(--border);
+  color: var(--dim);
+  font-size: 0.8rem;
+}
+</style>
+</head>
+
+<body>
+
+<header>
+  <h1>IRON GATE</h1>
+  <span>Hardened Python 3 Web Server — Operator & Developer Guide</span>
+</header>
+
+<div class="container">
+
+  <div class="panel">
+    <h2>About This Server</h2>
+    <p>
+      IronGate is a hardened, self-contained Python 3 web server built for
+      hostile or untrusted environments. It combines real-time traffic
+      inspection, adaptive threat scoring, automatic IP bans, forensic logging,
+      and a full-screen Textual TUI dashboard.
+    </p>
+    <p>
+      This is not a framework. It is an <strong>operational defensive system</strong>
+      intended for direct exposure to the internet.
+    </p>
+    <div class="badge">Threaded HTTP</div>
+    <div class="badge">PHP-CGI Sandbox</div>
+    <div class="badge">Auto Ban Engine</div>
+    <div class="badge">SQLite Forensics</div>
+    <div class="badge">Live TUI</div>
+  </div>
+
+  <div class="panel">
+    <h2>Developer</h2>
+    <p>
+      Designed and implemented by <strong>Krintoxi</strong>.
+    </p>
+    <p>
+      GitHub: <a href="https://github.com/krintoxi" target="_blank">
+        https://github.com/krintoxi
+      </a>
+    </p>
+    <p>
+      The codebase emphasizes visibility, control, and defensive autonomy over
+      abstraction or convenience.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h2>Project Layout</h2>
+    <pre>
+project/
+├─ server.py          # Main server, defense logic & TUI
+├─ WWW/               # Web root (served content)
+│  ├─ index.html      # This operator guide
+│  ├─ index.php       # Optional PHP entrypoint
+│  └─ .htaccess       # Optional access rules
+├─ logs.db            # SQLite traffic database
+├─ geoip.mmdb         # MaxMind GeoIP database
+├─ evidence/          # Exported IP evidence
+    </pre>
+  </div>
+
+  <div class="panel">
+    <h2>WWW Directory Behavior</h2>
+    <ul>
+      <li>Only files inside <code>WWW/</code> are reachable</li>
+      <li>Realpath enforcement prevents traversal attacks</li>
+      <li>Dangerous extensions are blocked (<code>.py</code>, <code>.env</code>, <code>.db</code>, etc)</li>
+      <li><code>index.php</code> or <code>index.html</code> required for directories</li>
+      <li>Directory listing disabled unless explicitly allowed</li>
+    </ul>
+  </div>
+
+  <div class="panel">
+    <h2>Threat Scoring & Auto-Bans</h2>
+    <p>
+      Each request is scored based on behavior. Scores decay over time to reduce
+      false positives.
+    </p>
+    <pre>
+404 responses            +2
+HTTP status ≥ 400        +1
+Suspicious file probes   +15
+Overlong URLs            +10
+
+Score ≥ 25 → Automatic IP Ban
+    </pre>
+    <p>
+      Bans are enforced before request processing and persisted in SQLite.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h2>Logging & Evidence</h2>
+    <ul>
+      <li>All requests logged to <code>logs.db</code></li>
+      <li>IP hit counts and behavior tracking</li>
+      <li>User-Agent and referrer capture</li>
+      <li>Per-IP evidence export</li>
+    </ul>
+    <p>
+      Evidence files are written to <code>evidence/&lt;ip&gt;.txt</code>.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h2>How To Run</h2>
+    <pre>
+pip install psutil maxminddb textual rich requests
+
+# Optional: enable AbuseIPDB integration
+export ABUSEIPDB_KEY="your_api_key"
+
+# Run (root required for port 80)
+sudo python3 server.py
+    </pre>
+    <p>
+      If port 80 is unavailable, IronGate automatically falls back to port 8080.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h2>TUI Operator Controls</h2>
+    <ul>
+      <li><code>b</code> — Ban selected IP</li>
+      <li><code>a</code> — AbuseIPDB lookup</li>
+      <li><code>s</code> — Export forensic evidence</li>
+      <li><code>DEL</code> — Delete log entry</li>
+      <li><code>Ctrl+C</code> — Shutdown server</li>
+    </ul>
+  </div>
+
+</div>
+
+<footer>
+  IronGate Web Defense • Developed by Krintoxi<br/>
+  <a href="https://github.com/krintoxi" target="_blank">github.com/krintoxi</a><br/>
+  If this page loads, the perimeter is active.
+</footer>
+
+</body>
+</html>

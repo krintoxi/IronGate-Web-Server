@@ -1,0 +1,54 @@
+# ----------------------------------------------------------------------
+# 1. DIRECTORY PRIVACY
+# ----------------------------------------------------------------------
+
+# This prevents users from seeing a list of files in folders
+# Your Python server reads this to toggle directory listing
+Options -Indexes
+
+# ----------------------------------------------------------------------
+# 2. SENSITIVE FILE PROTECTION (Parsed by Python FilesMatch)
+# ----------------------------------------------------------------------
+
+# This blocks direct web access to sensitive extensions.
+# Your Python server dynamic parser will return a 403 for these patterns.
+<FilesMatch "\.(db|sql|sqlite|log|env|ini|conf|bak|yaml|sh|pem|key)$">
+    Require all denied
+</FilesMatch>
+
+# Specifically block the server source code and config files
+<FilesMatch "^(server\.py|vhosts\.conf|composer\.json|package\.json)$">
+    Require all denied
+</FilesMatch>
+
+# Block access to the .htaccess file itself
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>
+
+# ----------------------------------------------------------------------
+# 3. MODERN MEDIA & MIME TYPES
+# ----------------------------------------------------------------------
+
+# Ensures modern 2026 media formats are handled correctly
+AddType video/mp4 .mp4
+AddType video/webm .webm
+AddType video/ogg .ogv
+AddType image/webp .webp
+AddType image/avif .avif
+
+# ----------------------------------------------------------------------
+# 4. IFRAME & SECURITY NOTES
+# ----------------------------------------------------------------------
+
+# NOTE: X-Frame-Options and CSP frame-ancestors are omitted.
+# This allows ljfragrances.uk and Google Sites to embed this content.
+# Your Python server will also scrub these headers from PHP output.
+
+<IfModule mod_headers.c>
+    Header set X-Content-Type-Options "nosniff"
+    Header set X-XSS-Protection "1; mode=block"
+    Header set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>
+
+AddDefaultCharset UTF-8
