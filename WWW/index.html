@@ -167,6 +167,34 @@ footer {
   </div>
 
   <div class="panel">
+    <h2>Docker Quick Start (Recommended)</h2>
+    <p>
+      Run IronGate in a secure container without manual dependencies.
+    </p>
+    <pre>
+# 1. Build the image
+docker build -t irongate .
+
+# 2. Run (Maps port 8080 to internal port 80)
+docker run -it -p 8080:80 irongate
+    </pre>
+  </div>
+
+  <div class="panel">
+    <h2>Cloudflare Tunnel Setup</h2>
+    <p>
+      If using <strong>Cloudflare Tunnel</strong>, point your service to the local Docker port.
+    </p>
+    <ul>
+      <li><strong>Service:</strong> HTTP</li>
+      <li><strong>URL:</strong> <code>127.0.0.1:8080</code></li>
+    </ul>
+    <p style="color: var(--red); font-size: 0.8rem;">
+      ⚠ Do not point the tunnel to Port 80 directly. Docker handles the translation from 8080 → 80.
+    </p>
+  </div>
+
+  <div class="panel">
     <h2>Project Layout</h2>
     <pre>
 project/
@@ -182,6 +210,25 @@ project/
   </div>
 
   <div class="panel">
+    <h2>Threat Scoring & Auto-Bans</h2>
+    <p>
+      Each request is scored based on behavior. Scores decay over time to reduce
+      false positives.
+    </p>
+    <pre>
+404 responses             +2
+HTTP status ≥ 400         +1
+Suspicious file probes    +15
+Overlong URLs             +10
+
+Score ≥ 25 → Automatic IP Ban
+    </pre>
+    <p>
+      Bans are enforced before request processing and persisted in SQLite.
+    </p>
+  </div>
+
+  <div class="panel">
     <h2>WWW Directory Behavior</h2>
     <ul>
       <li>Only files inside <code>WWW/</code> are reachable</li>
@@ -193,39 +240,7 @@ project/
   </div>
 
   <div class="panel">
-    <h2>Threat Scoring & Auto-Bans</h2>
-    <p>
-      Each request is scored based on behavior. Scores decay over time to reduce
-      false positives.
-    </p>
-    <pre>
-404 responses            +2
-HTTP status ≥ 400        +1
-Suspicious file probes   +15
-Overlong URLs            +10
-
-Score ≥ 25 → Automatic IP Ban
-    </pre>
-    <p>
-      Bans are enforced before request processing and persisted in SQLite.
-    </p>
-  </div>
-
-  <div class="panel">
-    <h2>Logging & Evidence</h2>
-    <ul>
-      <li>All requests logged to <code>logs.db</code></li>
-      <li>IP hit counts and behavior tracking</li>
-      <li>User-Agent and referrer capture</li>
-      <li>Per-IP evidence export</li>
-    </ul>
-    <p>
-      Evidence files are written to <code>evidence/&lt;ip&gt;.txt</code>.
-    </p>
-  </div>
-
-  <div class="panel">
-    <h2>How To Run</h2>
+    <h2>Manual Installation</h2>
     <pre>
 pip install psutil maxminddb textual rich requests
 
@@ -235,9 +250,6 @@ export ABUSEIPDB_KEY="your_api_key"
 # Run (root required for port 80)
 sudo python3 server.py
     </pre>
-    <p>
-      If port 80 is unavailable, IronGate automatically falls back to port 8080.
-    </p>
   </div>
 
   <div class="panel">

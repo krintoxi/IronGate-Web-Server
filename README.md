@@ -1,21 +1,51 @@
 # 🛡️ IronGate Web Server
+<pre><code>
+██╗██████╗  ██████╗ ███╗   ██╗ ██████╗  █████╗ ████████╗███████╗
+██║██╔══██╗██╔═══██╗████╗  ██║██╔════╝ ██╔══██╗╚══██╔══╝██╔════╝
+██║██████╔╝██║   ██║██╔██╗ ██║██║  ███╗███████║   ██║   █████╗  
+██║██╔══██╗██║   ██║██║╚██╗██║██║   ██║██╔══██║   ██║   ██╔══╝  
+██║██║  ██║╚██████╔╝██║ ╚████║╚██████╔╝██║  ██║   ██║   ███████╗
+╚═╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝
+
+        ACTIVE DEFENSIVE PERIMETER
+        UNAUTHORIZED ACTIVITY LOGGED
+        ADAPTIVE THREAT RESPONSE ENABLED
+</code></pre>
+
 
 **IronGate** is a hardened, self-contained Python 3 web server engineered for hostile or untrusted environments. It combines real-time traffic inspection, adaptive threat scoring, automatic IP bans, forensic logging, and a full-screen Textual TUI dashboard.
 
-This is not a framework. It is an **operational defensive system** intended for direct exposure to the internet.
+This is **not a framework**.  
+This is an **operational defensive perimeter** intended for **direct internet exposure**.
 
 Developed by **[Krintoxi](https://github.com/krintoxi)**.
 
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![Docker](https://img.shields.io/badge/docker-supported-2496ED)
+![Platform](https://img.shields.io/badge/platform-linux-critical)
+![Status](https://img.shields.io/badge/status-active_defense-red)
+![License](https://img.shields.io/badge/license-proprietary-black)
 ---
 
-## 🚀 Key Features
+## 🚀 Capabilities
 
-* **Threaded HTTP Engine** – High-concurrency handling with a minimal footprint.
-* **Adaptive Threat Scoring** – Dynamic IP reputation system that decays over time.
-* **Auto-Ban Engine** – Immediate, persistent blocking of malicious actors.
-* **Forensic Logging** – SQLite-backed traffic analysis and per-IP evidence exporting.
-* **Live TUI Dashboard** – A full-screen terminal interface for real-time monitoring and operator control.
-* **PHP-CGI Sandbox** – Secure execution of PHP scripts via a controlled interface.
+- **Threaded HTTP Engine**  
+  High-concurrency request handling with a minimal attack surface
+
+- **Adaptive Threat Scoring**  
+  Behavior-based IP reputation with time-decay to mitigate false positives
+
+- **Automated Ban Enforcement**  
+  Persistent IP bans enforced *before* request processing
+
+- **Forensic Traffic Logging**  
+  SQLite-backed request capture with per-IP evidence export
+
+- **Live Operator TUI**  
+  Full-screen terminal dashboard for monitoring, triage, and response
+
+- **PHP-CGI Containment**  
+  Controlled execution of PHP scripts through a hardened interface
 
 ---
 
@@ -41,7 +71,7 @@ Developed by **[Krintoxi](https://github.com/krintoxi)**.
 * **Directory Stealth:** Directory listing is disabled; requires `index.html` or `index.php`.
 
 ### Threat Scoring & Auto-Bans
-Each request is scored based on behavior. Scores decay over time to reduce false positives.
+Scores decay by 1 point every 10 seconds to reduce false positives.
 
 | Event                     | Score |
 | :------------------------ | :---- |
@@ -52,12 +82,27 @@ Each request is scored based on behavior. Scores decay over time to reduce false
 
 **Score ≥ 25 → Automatic IP Ban.** Bans are enforced at the socket level before request processing and persisted in SQLite.
 
+# 🚀 Quick Start Installation (Recommended) (Docker)
+
+The fastest way to deploy the perimeter without messing with local dependencies.
+
+#### 1. Build the Image by opening terminal inside of project folder and running:
+
+<code>*docker build -t irongate .*</code>
+
+#### 2. Run the Server
+
+This maps port 8080 on your machine to port 80 inside the container.
+
+<code>docker run -it -p 8080:80 irongate</code>
+
+#### TIP: Cloudflare Users: Point your tunnel to 127.0.0.1:8080. Docker handles the internal translation to Port 80 for you.
 ---
 
-## 🛠️ Installation & Setup
+## 🛠️ Manual Installation (No Docker)
 
 ### 1. Install Dependencies
-`pip install psutil maxminddb textual rich requests`
+`pip install psutil maxminddb textual rich requests --break-system-packages`
 
 ### 2. Configuration (Optional)
 Enable **AbuseIPDB** integration for enhanced threat intelligence:

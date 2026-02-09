@@ -1,0 +1,5 @@
+psutil
+maxminddb
+textual
+rich
+requests
