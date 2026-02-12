@@ -12,7 +12,6 @@ import random
 import secrets
 import csv
 import math
-import webbrowser
 from collections import Counter, deque, defaultdict
 from datetime import datetime
 
@@ -22,7 +21,7 @@ try: import psutil
 except ImportError: MISSING_LIBS.append("psutil")
 try: import maxminddb
 except ImportError: MISSING_LIBS.append("maxminddb")
-try: import requests  # ✅ FIX 2: Added requests to dependency checker
+try: import requests  
 except ImportError: MISSING_LIBS.append("requests")
 try:
     from rich.text import Text
@@ -49,12 +48,12 @@ DB_PATH = os.path.join(PROJECT_ROOT, "logs.db")
 EVIDENCE_DIR = os.path.join(PROJECT_ROOT, "evidence")
 HTACCESS_PATH = os.path.join(SITE_ROOT, ".htaccess")
 
-# ✅ FIX 1: Load Key from Environment Variable properly
-ABUSEIPDB_KEY = os.getenv("ABUSEIPDB_KEY")
+# API Key
+ABUSEIPDB_KEY = "paste-your-key-here"
 
 # --- Security & UI Assets ---
 FORBIDDEN_EXT = {".py", ".conf", ".sql", ".sqlite", ".db", ".log", ".env", ".bak", ".ini", ".htaccess"}
-FORBIDDEN_FILES = {"server.py", "vhosts.conf", "composer.json"}
+FORBIDDEN_FILES = {"server.py", "vhosts.conf", "composer.json", "Dockerfile", "docker-compose.yml"}
 SPARK_CHARS = " ▂▃▄▅▆▇█"
 
 # --- Stats & Global State ---
@@ -75,37 +74,70 @@ system_stats = {
     "rps": 0
 }
 
-# --- GeoIP ---
+# --- GeoIP Loader ---
 try:
     geo_reader = maxminddb.open_database(MMDB_PATH)
-except Exception:
+    print(f"✅ GEOIP DATABASE LOADED: {MMDB_PATH}")
+except Exception as e:
+    print(f"⚠️ GEOIP ERROR: {e}")
     geo_reader = None
 
-# --- Intelligence & Defense Logic ---
+# --- Helper Functions ---
 
 def sparkline(values, max_val=100):
     if not values: return ""
+    safe_values = list(values) 
     out = ""
-    for v in values:
+    for v in safe_values:
         idx = int((v / (max_val or 1)) * (len(SPARK_CHARS) - 1))
         out += SPARK_CHARS[min(max(0, idx), len(SPARK_CHARS) - 1)]
     return out
 
-def score_request(ip, status, path):
-    # Whitelist harmless browser noise
-    if path.strip("/") in ["favicon.ico", "robots.txt", "apple-touch-icon.png", "sitemap.xml"]:
+def get_geo_country(ip):
+    """Helper to get full country name from IP"""
+    if ip in ("127.0.0.1", "::1") or ip.startswith("192.168."): return "LOCAL"
+    if not geo_reader: return "N/A"
+    try:
+        res = geo_reader.get(ip)
+        if res: return res.get("country", {}).get("names", {}).get("en", "Unknown").upper()
+    except: pass
+    return "Unknown"
+
+def score_request(ip, status, path, query=""):
+    full_url = (path + query).lower()
+    
+    if path.strip("/") in ["favicon.ico", "robots.txt", "sitemap.xml", "manifest.json"]:
         return 0
-        
+
     score = 0
-    if status >= 400: score += 1      # Reduced from 2 to 1 (less aggressive)
-    if status == 404: score += 2      # Reduced from 3 to 2
     
-    # Heavier penalties for actual threats
-    if len(path) > 120: score += 10   # Increased: Long URLs are usually attacks
+    if status == 404:
+        if path.endswith(('.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.woff', '.ttf')): 
+            return 0 
+        if path.endswith(('.zip', '.tar', '.gz', '.log', '.sql', '.bak', '.old', '.env', '.config')):
+            return 40 
+        score += 5 
+        
+    elif status == 403:
+        score += 25 
+        
+    elif status >= 500:
+        score += 0 
     
-    # Block dangerous patterns
-    if re.search(r"\.env|wp-|\.git|\.php", path, re.I) and not path.startswith("/index.php"): 
-        score += 15 # Instant critical score
+    # SQLi & XSS Detection
+    attack_pattern = re.compile(
+        r"union\s+select|' OR '1'='1|waitfor\s+delay|;.*drop\s+table|"
+        r"<script|javascript:|onerror=|onload=|eval\(|"
+        r"\.\./\.\./|/etc/passwd|/boot.ini|C:\\Windows|"
+        r"cmd=|exec=|system\(|shell_exec",
+        re.IGNORECASE
+    )
+
+    if attack_pattern.search(full_url):
+        return 100 
+
+    if re.search(r"\.env|wp-config|\.git|\.bak|\.sql|/admin/|/phpmyadmin/", path, re.I): 
+        score += 50 
         
     return score
 
@@ -125,13 +157,11 @@ def export_ip_evidence(ip):
 def abuseipdb_check(ip):
     if not ABUSEIPDB_KEY: return None
     try:
-        # Note: requests is already imported at top now
         r = requests.get("https://api.abuseipdb.com/api/v2/check", 
                          params={"ipAddress": ip, "maxAgeInDays": 90},
                          headers={"Key": ABUSEIPDB_KEY, "Accept": "application/json"}, timeout=5)
-        return r.json()["data"]
-    except Exception as e: # ✅ FIX 3: Print errors
-        print(f"[ERROR ABUSEDB] {e}")
+        return r.json().get("data")
+    except Exception as e:
         return None
 
 # --- Database Manager ---
@@ -140,22 +170,68 @@ def init_db():
         conn = sqlite3.connect(DB_PATH)
         conn.execute("PRAGMA journal_mode=WAL;") 
         c = conn.cursor()
+        
         c.execute("""CREATE TABLE IF NOT EXISTS access_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT, req_hex TEXT, ts TEXT, ip TEXT, 
             country TEXT, domain TEXT, path TEXT, status INTEGER, method TEXT, 
             ms REAL, ua TEXT, ref TEXT, hit_count INTEGER
         )""")
-        c.execute("CREATE TABLE IF NOT EXISTS ip_bans (id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT UNIQUE, reason TEXT, banned_at TEXT)")
-        # Migrations/Checks
+        
+        c.execute("CREATE TABLE IF NOT EXISTS ip_bans (id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT UNIQUE, reason TEXT, banned_at TEXT, country TEXT DEFAULT '??')")
+        
+        # --- MIGRATIONS ---
         c.execute("PRAGMA table_info(access_logs)")
         cols = [info[1] for info in c.fetchall()]
+        
+        if "country" not in cols:
+            print(">> MIGRATING DB: Adding 'country' to access_logs...")
+            c.execute("ALTER TABLE access_logs ADD COLUMN country TEXT DEFAULT '??'")
+            
         if "ua" not in cols: c.execute("ALTER TABLE access_logs ADD COLUMN ua TEXT DEFAULT '-'")
         if "ref" not in cols: c.execute("ALTER TABLE access_logs ADD COLUMN ref TEXT DEFAULT '-'")
         if "req_hex" not in cols: c.execute("ALTER TABLE access_logs ADD COLUMN req_hex TEXT DEFAULT '0000'")
         if "hit_count" not in cols: c.execute("ALTER TABLE access_logs ADD COLUMN hit_count INTEGER DEFAULT 1")
+        
+        c.execute("PRAGMA table_info(ip_bans)")
+        ban_cols = [info[1] for info in c.fetchall()]
+        if "country" not in ban_cols: 
+            print(">> MIGRATING DB: Adding 'country' to ip_bans...")
+            c.execute("ALTER TABLE ip_bans ADD COLUMN country TEXT DEFAULT '??'")
+
         conn.commit()
         conn.close()
-    except Exception: pass
+    except Exception as e: 
+        print(f"[DB INIT ERROR] {e}")
+
+def retro_fill_countries():
+    if not geo_reader: return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        
+        c.execute("SELECT DISTINCT ip FROM access_logs WHERE country IN ('??', 'N/A', 'Unknown', '') OR country IS NULL")
+        ips_to_fix = c.fetchall()
+        count = 0
+        for (ip,) in ips_to_fix:
+            cn = get_geo_country(ip)
+            if cn not in ("N/A", "Unknown"):
+                c.execute("UPDATE access_logs SET country=? WHERE ip=?", (cn, ip))
+                count += 1
+        
+        c.execute("SELECT ip FROM ip_bans WHERE country IN ('??', 'N/A', 'Unknown', '') OR country IS NULL")
+        bans_to_fix = c.fetchall()
+        for (ip,) in bans_to_fix:
+            cn = get_geo_country(ip)
+            if cn not in ("N/A", "Unknown"):
+                c.execute("UPDATE ip_bans SET country=? WHERE ip=?", (cn, ip))
+                count += 1
+
+        if count > 0:
+            print(f"✅ DB REPAIR: Auto-filled countries for {count} records.")
+            conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[BACKFILL ERROR] {e}")
 
 def is_banned(ip):
     try:
@@ -167,12 +243,13 @@ def is_banned(ip):
         return bool(r)
     except: return False
 
-def ban_ip_db(ip, reason="Admin Tool"):
+def ban_ip_db(ip, reason="Admin Tool", country="??"):
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("INSERT OR REPLACE INTO ip_bans (ip, reason, banned_at) VALUES (?,?,?)", 
-                  (ip, reason, datetime.now().isoformat()))
+        if country in ("??", "N/A"): country = get_geo_country(ip)
+        c.execute("INSERT OR REPLACE INTO ip_bans (ip, reason, banned_at, country) VALUES (?,?,?,?)", 
+                  (ip, reason, datetime.now().isoformat(), country))
         conn.commit()
         conn.close()
         return True
@@ -184,18 +261,14 @@ def unban_ip_db(ip):
         conn.execute("DELETE FROM ip_bans WHERE ip=?", (ip,))
         conn.commit()
         conn.close()
-        
-        # ✅ RESET SCORE IN MEMORY
-        if ip in ip_scores:
-            ip_scores[ip] = 0
-            
+        if ip in ip_scores: ip_scores[ip] = 0
         return True
     except: return False
 
 def fetch_bans():
     try:
         conn = sqlite3.connect(DB_PATH)
-        rows = conn.execute("SELECT ip, reason, banned_at FROM ip_bans ORDER BY banned_at DESC").fetchall()
+        rows = conn.execute("SELECT ip, country, reason, banned_at FROM ip_bans ORDER BY banned_at DESC").fetchall()
         conn.close()
         return rows
     except: return []
@@ -258,33 +331,30 @@ def delete_logs_db(filter_ip=None, filter_status=None, delete_id=None):
     except: return 0
 
 init_db()
+retro_fill_countries()
 
 # --- System Stats Sampler ---
 def system_stats_sampler():
     global system_stats, req_timestamps
     decay_timer = 0
-    
     while True:
         try:
-            # ... existing stats code ...
             system_stats["cpu"] = psutil.cpu_percent(interval=None)
             system_stats["ram"] = psutil.virtual_memory().percent
             system_stats["disk"] = psutil.disk_usage("/").percent
             now = time.time()
             req_timestamps[:] = [t for t in req_timestamps if now - t <= 1]
             system_stats["rps"] = len(req_timestamps)
-            
             spark_cpu.append(system_stats["cpu"])
             spark_rps.append(system_stats["rps"])
 
-            # ✅ NEW: Score Decay (Runs every 10 seconds approx)
             decay_timer += 1
-            if decay_timer >= 20: # 20 * 0.5s = 10 seconds
+            if decay_timer >= 30: 
                 decay_timer = 0
                 for ip in list(ip_scores):
                     if ip_scores[ip] > 0:
-                        ip_scores[ip] -= 1 # Forgive 1 point every 10s
-                        if ip_scores[ip] == 0: del ip_scores[ip] # Cleanup memory
+                        ip_scores[ip] -= 1
+                        if ip_scores[ip] <= 0: del ip_scores[ip]
 
         except Exception as e:
             print(f"[ERROR STATS] {e}")
@@ -311,18 +381,9 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     request_queue_size = 100 
 
 class HardenedPHPServer(BaseHTTPRequestHandler):
-    server_version = "IronGate/12.9"
+    server_version = "IronGate/17.0"
 
     def log_message(self, format, *args): pass
-
-    def get_origin(self, ip):
-        if ip in ("127.0.0.1", "::1") or ip.startswith("192.168."): return "LOCAL"
-        if geo_reader:
-            try:
-                res = geo_reader.get(ip)
-                if res: return res.get("country", {}).get("names", {}).get("en", "Unknown").upper()
-            except: pass
-        return "N/A"
 
     def add_security_headers(self):
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -347,15 +408,22 @@ class HardenedPHPServer(BaseHTTPRequestHandler):
     def handle_request(self):
         global alert_trigger
         start_ts = time.time()
-        client_ip = self.client_address[0]
+        
+        if self.headers.get("CF-Connecting-IP"):
+            client_ip = self.headers.get("CF-Connecting-IP")
+        elif self.headers.get("X-Forwarded-For"):
+            client_ip = self.headers.get("X-Forwarded-For").split(",")[0].strip()
+        else:
+            client_ip = self.client_address[0]
+            
+        origin = get_geo_country(client_ip)
+            
         host_domain = self.headers.get('Host', 'unknown-host')
         user_agent = self.headers.get('User-Agent', '-')
         referrer = self.headers.get('Referer', '-')
         req_id = secrets.token_hex(2).upper()
         status_code = 200
         url_path = "-"
-        
-        # ✅ FIX 4: Removed req_timestamps.append(start_ts) from here
         
         try:
             if is_banned(client_ip):
@@ -399,20 +467,20 @@ class HardenedPHPServer(BaseHTTPRequestHandler):
             else:
                 status_code = int(self.serve_static(full_path))
 
-        except Exception as e: # ✅ FIX 3: Print errors
+        except Exception as e:
             print(f"[ERROR REQUEST] {e}")
             status_code = 500
         finally:
-            # ✅ FIX 4: Add timestamp here (completed requests)
             req_timestamps.append(time.time())
-
-            ip_scores[client_ip] += score_request(client_ip, status_code, url_path)
-            if ip_scores[client_ip] >= 25:
-                ban_ip_db(client_ip, f"Auto-Score: {ip_scores[client_ip]}")
+            
+            ip_scores[client_ip] += score_request(client_ip, status_code, url_path, query_string)
+            
+            if ip_scores[client_ip] >= 100:
+                ban_ip_db(client_ip, f"Automated Defense: Score {ip_scores[client_ip]}", origin)
                 alert_trigger = True
 
             duration = (time.time() - start_ts) * 1000
-            origin = self.get_origin(client_ip)
+            
             threading.Thread(target=log_request_db, 
                 args=(req_id, datetime.now().isoformat(), client_ip, origin, host_domain, url_path, status_code, self.command, duration, user_agent, referrer)).start()
             
@@ -435,13 +503,10 @@ class HardenedPHPServer(BaseHTTPRequestHandler):
                 "REDIRECT_STATUS": "200", "REMOTE_ADDR": self.client_address[0],
                 "SERVER_SOFTWARE": self.server_version, "DOCUMENT_ROOT": SITE_ROOT
             })
-            
-            # ✅ FIX 6: Handle bad Content-Length safely
             try:
                 body = self.rfile.read(int(content_length)) if content_length else b""
             except ValueError:
                 body = b""
-                
             proc = subprocess.Popen([PHP_CGI], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, cwd=os.path.dirname(script_path))
             stdout, stderr = proc.communicate(input=body)
             if b"\r\n\r\n" not in stdout: return 502
@@ -460,7 +525,7 @@ class HardenedPHPServer(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return status
-        except Exception as e: # ✅ FIX 3: Print errors
+        except Exception as e:
             print(f"[ERROR PHP] {e}")
             return 500
 
@@ -482,41 +547,34 @@ class HardenedPHPServer(BaseHTTPRequestHandler):
 # --- TUI Dashboard ---
 
 class InspectorPanel(Static):
+    # UPDATED CSS: Removed buttons, reduced height to be a status bar
     DEFAULT_CSS = """
     InspectorPanel { 
-        height: 7; dock: bottom; border-top: solid green; background: #111; padding: 1; layout: horizontal;
+        height: 5; dock: bottom; border-top: solid green; background: #111; padding: 1;
     }
-    .info-col { width: 3fr; color: white; }
-    .action-col { width: 1fr; layout: grid; grid-size: 2; grid-gutter: 1; }
+    .info-col { width: 100%; color: white; }
     .label { color: #888; text-style: bold; }
     .val { color: cyan; }
-    .btn-action { height: 3; width: 100%; border: none; content-align: center middle; color: #ffffff; text-style: bold; background: #333; }
-    .btn-abuse { background: #E67E22; }
-    .btn-save { background: #2980B9; }
-    .btn-ban { background: #C0392B; }
-    .btn-del { background: #7F8C8D; }
-    .btn-action:hover { color: #00FF00; background: #111; }
     """
-    selected_data = None
+    selected_ip = None
+    selected_cn = "??"
+    selected_id = None
     
     def compose(self) -> ComposeResult:
         with Vertical(classes="info-col"):
-            yield Label("[SELECT A LOG ENTRY]", id="insp-title", classes="val")
+            yield Label("[SELECT AN ENTRY]", id="insp-title", classes="val")
             yield Label("SCORE: 0", id="insp-score", classes="label")
-            yield Label("UA: -", id="insp-ua", classes="label")
-        with Container(classes="action-col"):
-            yield Button("ABUSE (a)", id="act-abuse", classes="btn-action btn-abuse")
-            yield Button("EVIDENCE (s)", id="act-save", classes="btn-action btn-save")
-            yield Button("BAN (b)", id="act-ban", classes="btn-action btn-ban")
-            yield Button("DEL (Del)", id="act-del", classes="btn-action btn-del")
+            yield Label("SOURCE: -", id="insp-source", classes="label")
+        # Buttons removed as requested
 
-    def update_info(self, row_data):
-        self.selected_data = row_data
-        ip = str(row_data[3].plain) if hasattr(row_data[3], "plain") else str(row_data[3])
-        ua = str(row_data[8])
-        self.query_one("#insp-title", Label).update(f"TARGET: {ip} [{row_data[4]} {row_data[5]}]")
-        self.query_one("#insp-score", Label).update(f"SCORE: {ip_scores[ip]}")
-        self.query_one("#insp-ua", Label).update(f"UA: {ua[:60]}...")
+    def update_target(self, ip, cn="??", db_id=None, source="Unknown"):
+        self.selected_ip = ip
+        self.selected_cn = cn
+        self.selected_id = db_id
+        
+        self.query_one("#insp-title", Label).update(f"TARGET: {ip} [{cn}]")
+        self.query_one("#insp-score", Label).update(f"LOCAL SCORE: {ip_scores[ip]}")
+        self.query_one("#insp-source", Label).update(f"SOURCE: {source}")
 
 class ServerApp(App):
     CSS = """
@@ -548,13 +606,13 @@ class ServerApp(App):
     ]
 
     def compose(self) -> ComposeResult:
-        yield Static(f"🛡️ Portable Py3 Webserver v12.9 |By: Krintoxi| Root: {SITE_ROOT}", id="header")
+        yield Static(f"🛡️ IronGate v17.0 |By: Krintoxi| Root: {SITE_ROOT}", id="header")
         with TabbedContent():
             with TabPane("LIVE TRAFFIC"):
-                # ✅ FIX 5: Changed Container to Horizontal for better layout
                 with Horizontal(id="main-layout"):
                     with Vertical(id="logs-box"):
-                        yield RichLog(id="log-scroll", highlight=True, markup=True)
+                        # REPLACED RichLog with DataTable for interactivity
+                        yield DataTable(id="live-table")
                     with Vertical(id="side-box"):
                         yield Static("SYSTEM STATS", classes="title")
                         yield Static(id="system-stats")
@@ -576,7 +634,6 @@ class ServerApp(App):
                         yield Label("Page 1/1", id="page-label")
                         yield Button("NEXT >", id="btn-next", classes="btn-hammer btn-h-gray")
                     yield DataTable(id="vault-table")
-                    yield InspectorPanel(id="inspector")
 
             with TabPane("BAN HAMMER"):
                 with Vertical(classes="vault-container"):
@@ -587,20 +644,30 @@ class ServerApp(App):
                         yield Button("REFRESH", id="btn-refresh-bans", classes="btn-hammer btn-h-gray")
                         yield Button("EXPORT CSV", id="btn-export-csv", classes="btn-hammer btn-h-blue")
                     yield DataTable(id="ban-table")
+        
+        # GLOBAL INSPECTOR (Outside Tabs)
+        yield InspectorPanel(id="inspector")
         yield Footer()
 
     def on_mount(self):
-        self.log_widget = self.query_one("#log-scroll", RichLog)
+        self.live_table = self.query_one("#live-table", DataTable)
         self.client_widget = self.query_one("#top-clients", Static)
         self.system_widget = self.query_one("#system-stats", Static)
         self.inspector = self.query_one("#inspector", InspectorPanel)
-        self.table = self.query_one("#vault-table", DataTable)
+        self.vault_table = self.query_one("#vault-table", DataTable)
         self.ban_table = self.query_one("#ban-table", DataTable)
         
-        self.table.cursor_type = "row" 
-        self.table.add_columns("ID", "HEX", "Time", "IP", "Method", "Status", "Path", "Country", "UA")
+        # Setup Live Table
+        self.live_table.cursor_type = "row"
+        self.live_table.add_columns("Time", "IP", "CN", "Method", "Path", "Status")
+        
+        # Setup Vault Table
+        self.vault_table.cursor_type = "row"
+        self.vault_table.add_columns("ID", "HEX", "Time", "IP", "Method", "Status", "Path", "CN", "UA")
+        
+        # Setup Ban Table
         self.ban_table.cursor_type = "row"
-        self.ban_table.add_columns("IP Address", "Reason", "Date Banned")
+        self.ban_table.add_columns("IP Address", "CN", "Reason", "Date Banned")
         
         self.set_interval(0.1, self.refresh_live_logs)
         self.set_interval(1.0, self.refresh_clients)
@@ -632,19 +699,61 @@ class ServerApp(App):
             alert_trigger = False
             self.set_timer(0.2, lambda: header.remove_class("alert-header"))
 
+    def get_plain(self, val):
+        return str(val.plain) if hasattr(val, "plain") else str(val)
+
     def on_data_table_row_highlighted(self, message: DataTable.RowHighlighted):
-        if message.data_table.id == "vault-table":
-            row_data = self.table.get_row(message.row_key)
-            self.inspector.update_info(row_data)
+        # UNIFIED HANDLER FOR ALL 3 TABLES
+        table_id = message.data_table.id
+        row = message.data_table.get_row(message.row_key)
+        
+        ip = "0.0.0.0"
+        cn = "??"
+        db_id = None
+        source = "Unknown"
+
+        if table_id == "live-table":
+            # Cols: "Time", "IP", "CN", "Method", "Path", "Status"
+            ip = self.get_plain(row[1])
+            cn = self.get_plain(row[2])
+            source = "LIVE TRAFFIC"
+
+        elif table_id == "vault-table":
+            # Cols: "ID", "HEX", "Time", "IP", "Method", "Status", "Path", "CN", "UA"
+            ip = self.get_plain(row[3])
+            cn = self.get_plain(row[7])
+            db_id = self.get_plain(row[0])
+            source = "LOG VAULT"
+            
+        elif table_id == "ban-table":
+            # Cols: "IP Address", "CN", "Reason", "Date Banned"
+            ip = self.get_plain(row[0])
+            cn = self.get_plain(row[1])
+            source = "BAN HAMMER"
+
+        self.inspector.update_target(ip, cn, db_id, source)
 
     def action_check_abuse(self):
-        data = self.inspector.selected_data
-        if not data: return
-        ip = str(data[3].plain) if hasattr(data[3], "plain") else str(data[3])
+        ip = self.inspector.selected_ip
+        if not ip: 
+            self.notify("No IP Selected!", severity="error")
+            return
+
+        # 🚫 Stop checking local IPs to save credits and avoid errors
+        if ip in ("127.0.0.1", "::1") or ip.startswith("192.168.") or ip.startswith("10."):
+            self.notify(f"⚠️ Skipped Local IP: {ip}", severity="warning")
+            return
+
+        self.notify(f"🔎 Checking AbuseIPDB for: {ip}...")
+        
         intel = abuseipdb_check(ip)
         if intel:
-            self.notify(f"Abuse Score: {intel['abuseConfidenceScore']}% | {intel['domain'] or 'Unknown'}")
-        webbrowser.open(f"https://www.abuseipdb.com/check/{ip}")
+            score = intel.get('abuseConfidenceScore', 0)
+            domain = intel.get('domain', 'Unknown')
+            reports = intel.get('totalReports', 0)
+            self.notify(f"🚨 Score: {score}% | Reports: {reports} | Host: {domain}", timeout=10)
+        else:
+            self.notify("❌ Lookup Failed (API Error or Rate Limit)", severity="error")
 
     def refresh_ban_table(self):
         self.ban_table.clear()
@@ -652,17 +761,12 @@ class ServerApp(App):
 
     def on_button_pressed(self, event: Button.Pressed):
         bid = event.button.id
-        if bid == "act-abuse": self.action_check_abuse()
-        elif bid == "act-save": self.action_save_log()
-        elif bid == "act-ban": self.action_ban_ip()
-        elif bid == "act-del": self.action_delete_row()
-        elif bid == "btn-refresh-bans": self.refresh_ban_table()
+        # Removed act-abuse, act-save, act-ban, act-del checks
+        if bid == "btn-refresh-bans": self.refresh_ban_table()
         elif bid == "btn-unban":
-            coord = self.ban_table.cursor_coordinate
-            if coord.row >= 0:
-                row = self.ban_table.get_row_at(coord.row)
-                if unban_ip_db(row[0]):
-                    self.notify(f"Unbanned {row[0]}"); self.refresh_ban_table()
+            ip = self.inspector.selected_ip
+            if ip and unban_ip_db(ip):
+                self.notify(f"Unbanned {ip}"); self.refresh_ban_table()
         elif bid == "btn-pause":
             global paused
             paused = not paused
@@ -674,7 +778,7 @@ class ServerApp(App):
             self.run_db_query()
 
     def run_db_query(self):
-        self.table.clear()
+        self.vault_table.clear()
         f_ip = self.query_one("#db-filter-ip", Input).value.strip()
         f_stat = self.query_one("#db-filter-status", Input).value.strip()
         f_geo = self.query_one("#db-filter-geo", Input).value.strip()
@@ -683,7 +787,7 @@ class ServerApp(App):
         self.query_one("#page-label", Label).update(f"Page {self.current_page}/{self.total_pages}")
         for r in rows:
             stat_style = "green" if r[5] < 400 else "red"
-            self.table.add_row(str(r[0]), Text(r[1], style="dim"), r[2], Text(r[3], style="cyan"), r[4], Text(str(r[5]), style=stat_style), r[6], r[7], r[8])
+            self.vault_table.add_row(str(r[0]), Text(r[1], style="dim"), r[2], Text(r[3], style="cyan"), r[4], Text(str(r[5]), style=stat_style), r[6], Text(r[7], style="yellow"), r[8])
 
     def refresh_live_logs(self):
         if paused: return
@@ -691,13 +795,25 @@ class ServerApp(App):
         if current_len > self.last_log_count:
             new_entries = list(log_buffer)[self.last_log_count:]
             for entry in new_entries:
-                t = Text()
-                t.append(f"[{entry['time']}] ", style="dim white")
-                t.append(f"{entry['ip']:<14} ", style="cyan")
+                # Add to Live Table instead of RichLog
+                # Cols: "Time", "IP", "CN", "Method", "Path", "Status"
+                geo_tag = entry['origin'] if entry['origin'] != "N/A" else "-"
                 s_style = "bold green" if entry['status'] < 400 else "bold red"
-                t.append(f"{entry['status']} ", style=s_style)
-                t.append(f"{entry['method']} {entry['path'][:30]}", style="white")
-                self.log_widget.write(t)
+                
+                self.live_table.add_row(
+                    entry['time'],
+                    Text(entry['ip'], style="cyan"),
+                    Text(geo_tag, style="yellow"),
+                    entry['method'],
+                    entry['path'][:30],
+                    Text(str(entry['status']), style=s_style)
+                )
+            
+            # Keep table clean (max 100 rows visible in TUI to prevent lag)
+            if self.live_table.row_count > 100:
+                self.live_table.remove_row(self.live_table.rows[0])
+                
+            self.live_table.scroll_end(animate=False)
             self.last_log_count = current_len
 
     def refresh_clients(self):
@@ -707,24 +823,26 @@ class ServerApp(App):
         self.client_widget.update(out)
 
     def action_save_log(self):
-        data = self.inspector.selected_data
-        if data:
-            ip = str(data[3].plain) if hasattr(data[3], "plain") else str(data[3])
+        ip = self.inspector.selected_ip
+        if ip:
             path = export_ip_evidence(ip)
             self.notify(f"Evidence Locker: {path}")
 
     def action_ban_ip(self):
-        data = self.inspector.selected_data
-        if data:
-            ip = str(data[3].plain) if hasattr(data[3], "plain") else str(data[3])
-            if ban_ip_db(ip, "CyberDeck Manual"):
-                self.notify(f"BANNED: {ip}"); self.refresh_ban_table()
+        ip = self.inspector.selected_ip
+        cn = self.inspector.selected_cn
+        if ip:
+            if ban_ip_db(ip, "CyberDeck Manual", cn):
+                self.notify(f"BANNED: {ip} [{cn}]"); self.refresh_ban_table()
 
     def action_delete_row(self):
-        data = self.inspector.selected_data
-        if data:
-            delete_logs_db(delete_id=data[0])
+        # Only allows deletion if we have a DB ID (which comes from Vault)
+        did = self.inspector.selected_id
+        if did:
+            delete_logs_db(delete_id=did)
             self.run_db_query(); self.notify("Log Deleted")
+        else:
+            self.notify("Can only delete from Vault", severity="warning")
 
 def start_server_thread():
     mimetypes.init()
