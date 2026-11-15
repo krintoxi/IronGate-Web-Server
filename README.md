@@ -22,7 +22,7 @@ Developed by **[Krintoxi](https://github.com/krintoxi)**.
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Docker](https://img.shields.io/badge/docker-supported-2496ED)
-![Platform](https://img.shields.io/badge/platform-linux-critical)
+![Platform](https://img.shields.io/badge/platform-linux%20%7C%20windows-critical)
 ![Status](https://img.shields.io/badge/status-active_defense-red)
 ![License](https://img.shields.io/badge/license-proprietary-black)
 ---
@@ -82,6 +82,19 @@ Scores decay by 1 point every 10 seconds to reduce false positives.
 
 **Score ≥ 25 → Automatic IP Ban.** Bans are enforced at the socket level before request processing and persisted in SQLite.
 
+# 🪟 Windows
+
+Download **IronGate-…-windows-x64.zip** from the [latest release](https://github.com/krintoxi/IronGate-Web-Server/releases/latest)
+(or [edgeventure.uk/downloads](https://edgeventure.uk/downloads/#irongate)), unzip it and double-click **Start IronGate.bat**.
+Python and every library are inside `IronGate.exe`; put your site in the `WWW` folder beside it. PHP is optional:
+`IronGate.exe` uses `php-cgi.exe` from your PATH, a `php` folder beside it, or `IRONGATE_PHP_CGI`. Details are in
+`README-Windows.txt` inside the zip.
+
+On Windows, IronGate also refuses requests that Windows would quietly map to another file: trailing dots or spaces,
+`::$DATA` streams, device names (`CON`, `NUL`, `COM1`…), 8.3 short names and any letter case of a blocked name.
+
+Every release is built and smoke-tested on GitHub's Windows machines (`.github/workflows/windows.yml`).
+
 # 🚀 Quick Start Installation (Recommended) (Docker)
 
 The fastest way to deploy the perimeter without messing with local dependencies.
@@ -111,6 +124,9 @@ Enable **AbuseIPDB** integration for enhanced threat intelligence:
 ### 3. Execution
 Root privileges are required to bind to port 80. IronGate automatically falls back to port **8080** if 80 is unavailable.
 `sudo python3 server.py`
+
+Options: `--port 8081` to pick a port, `--headless` for a plain request log instead of the dashboard
+(also `IRONGATE_PORT`, `IRONGATE_PHP_CGI`).
 
 ---
 

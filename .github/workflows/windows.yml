@@ -1,0 +1,102 @@
+name: Windows build
+
+# Every pull request and push to main builds IronGate.exe and tests it on Windows.
+# A tag v* (for example v17.1.0) also publishes the zip as a GitHub release.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build IronGate.exe
+        run: pyinstaller --noconfirm --onefile --console --name IronGate --collect-all textual --collect-all rich server.py
+
+      - name: Assemble the folder
+        shell: pwsh
+        run: |
+          $ver = (Select-String -Path server.py -Pattern '^VERSION = "([^"]+)"').Matches[0].Groups[1].Value
+          $name = "IronGate-$ver-windows-x64"
+          $out = "pkg\$name"
+          New-Item -ItemType Directory -Force "$out\WWW" | Out-Null
+          Copy-Item dist\IronGate.exe $out
+          Copy-Item WWW\* "$out\WWW" -Recurse
+          Copy-Item .htaccess "$out\WWW\.htaccess"
+          Copy-Item geoip.mmdb $out
+          Copy-Item "windows\Start IronGate.bat" $out
+          Copy-Item windows\README-Windows.txt $out
+          "NAME=$name" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "VER=$ver" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+
+      - name: Smoke test the .exe (static, Windows paths, PHP)
+        shell: pwsh
+        run: |
+          $dir = "pkg\$env:NAME"
+          $php = (Get-Command php-cgi.exe -ErrorAction SilentlyContinue).Source
+          if (-not $php) { $php = Join-Path (Split-Path (Get-Command php.exe).Source) 'php-cgi.exe' }
+          if (-not (Test-Path $php)) { throw "php-cgi.exe not found" }
+          $env:IRONGATE_PHP_CGI = $php
+          '<?php echo "IRONGATE-PHP-OK"; ?>' | Set-Content "$dir\WWW\_smoke.php" -NoNewline
+          $p = Start-Process -FilePath "$dir\IronGate.exe" -ArgumentList '--headless','--port','8080' -WorkingDirectory $dir -PassThru -RedirectStandardOutput server.log -RedirectStandardError server.err
+          try {
+            python Tools\smoke-test.py http://127.0.0.1:8080 --windows --php
+            $code = $LASTEXITCODE
+          } finally {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            Get-Content server.log, server.err -ErrorAction SilentlyContinue
+          }
+          Start-Sleep 1
+          Remove-Item "$dir\WWW\_smoke.php", "$dir\logs.db*" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$dir\evidence" -Recurse -Force -ErrorAction SilentlyContinue
+          if ($code -ne 0) { exit $code }
+
+      - name: Zip and checksum
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "pkg\$env:NAME" -DestinationPath "$env:NAME.zip" -Force
+          $h = (Get-FileHash "$env:NAME.zip" -Algorithm SHA256).Hash.ToLower()
+          "$h  $env:NAME.zip" | Set-Content "$env:NAME.zip.sha256" -NoNewline
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: |
+            ${{ env.NAME }}.zip
+            ${{ env.NAME }}.zip.sha256
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "$env:GITHUB_REF_NAME"
+          if ($tag -ne "v$env:VER") { throw "Tag $tag does not match VERSION $env:VER in server.py" }
+          $notes = @"
+          IronGate $env:VER for Windows 10 and 11 (64-bit). Unzip, then double-click **Start IronGate.bat**. Python and its libraries are inside IronGate.exe; PHP is optional (see README-Windows.txt).
+
+          Built and smoke-tested on GitHub's Windows machines: static files, PHP through php-cgi, and the Windows path protections (trailing dots and spaces, ::`$DATA streams, device names, 8.3 short names, case). Not signed yet, so SmartScreen asks first: More info, then Run anyway.
+          "@
+          gh release create $tag "$env:NAME.zip" "$env:NAME.zip.sha256" --title "IronGate $env:VER (Windows)" --notes $notes
