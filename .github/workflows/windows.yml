@@ -1,7 +1,8 @@
 name: Windows build
 
 # Every pull request and push to main builds IronGate.exe and tests it on Windows.
-# A tag v* (for example v17.1.0) also publishes the zip as a GitHub release.
+# A push to main publishes release v<VERSION> (VERSION in server.py) the first time that version reaches main, so
+# raising VERSION is all a release takes. A tag v* pushed by hand publishes too.
 on:
   push:
     branches: [main]
@@ -87,16 +88,18 @@ jobs:
             ${{ env.NAME }}.zip.sha256
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "$env:GITHUB_REF_NAME"
-          if ($tag -ne "v$env:VER") { throw "Tag $tag does not match VERSION $env:VER in server.py" }
+          $tag = "v$env:VER"
+          if ("$env:GITHUB_REF" -like 'refs/tags/*' -and "$env:GITHUB_REF_NAME" -ne $tag) { throw "Tag $env:GITHUB_REF_NAME does not match VERSION $env:VER in server.py" }
+          gh release view $tag --repo "$env:GITHUB_REPOSITORY" *> $null
+          if ($LASTEXITCODE -eq 0) { Write-Host "Release $tag already exists; raise VERSION in server.py to publish a new one."; exit 0 }
           $notes = @"
           IronGate $env:VER for Windows 10 and 11 (64-bit). Unzip, then double-click **Start IronGate.bat**. Python and its libraries are inside IronGate.exe; PHP is optional (see README-Windows.txt).
 
           Built and smoke-tested on GitHub's Windows machines: static files, PHP through php-cgi, and the Windows path protections (trailing dots and spaces, ::`$DATA streams, device names, 8.3 short names, case). Not signed yet, so SmartScreen asks first: More info, then Run anyway.
           "@
-          gh release create $tag "$env:NAME.zip" "$env:NAME.zip.sha256" --title "IronGate $env:VER (Windows)" --notes $notes
+          gh release create $tag "$env:NAME.zip" "$env:NAME.zip.sha256" --target "$env:GITHUB_SHA" --title "IronGate $env:VER (Windows)" --notes $notes --latest
