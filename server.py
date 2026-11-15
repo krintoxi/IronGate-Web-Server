@@ -38,22 +38,47 @@ if MISSING_LIBS:
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 
+VERSION = "17.1.0"
+
+# --- Platform ---
+IS_WINDOWS = os.name == "nt"
+FROZEN = getattr(sys, "frozen", False)   # the Windows .exe build (PyInstaller)
+
+# A console that cannot show the emoji/box characters (old Windows code pages, output piped to a file) must not
+# crash the server at start-up: show a "?" instead.
+for _stream in (sys.stdout, sys.stderr):
+    try: _stream.reconfigure(errors="replace")
+    except Exception: pass
+
 # --- Configuration ---
-PORT = 80
-PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
+PORT = int(os.environ.get("IRONGATE_PORT", "80") or 80)
+# The .exe keeps WWW/, logs.db, evidence/ and geoip.mmdb beside itself, not in its temporary unpack folder.
+PROJECT_ROOT = os.path.dirname(os.path.abspath(sys.executable)) if FROZEN else os.path.abspath(os.path.dirname(__file__))
 SITE_ROOT = os.path.join(PROJECT_ROOT, "WWW")
-PHP_CGI = shutil.which("php-cgi") or "/usr/bin/php-cgi"
+
+def find_php_cgi():
+    found = shutil.which("php-cgi")
+    if found: return found
+    if IS_WINDOWS:
+        for cand in (os.path.join(PROJECT_ROOT, "php", "php-cgi.exe"), r"C:\php\php-cgi.exe",
+                     os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "PHP", "php-cgi.exe")):
+            if os.path.isfile(cand): return cand
+        return "php-cgi.exe"
+    return "/usr/bin/php-cgi"
+
+PHP_CGI = os.environ.get("IRONGATE_PHP_CGI") or find_php_cgi()
 MMDB_PATH = os.path.join(PROJECT_ROOT, "geoip.mmdb")
 DB_PATH = os.path.join(PROJECT_ROOT, "logs.db")
 EVIDENCE_DIR = os.path.join(PROJECT_ROOT, "evidence")
 HTACCESS_PATH = os.path.join(SITE_ROOT, ".htaccess")
 
 # API Key
-ABUSEIPDB_KEY = "paste-your-key-here"
+ABUSEIPDB_KEY = os.environ.get("ABUSEIPDB_KEY", "")
 
 # --- Security & UI Assets ---
 FORBIDDEN_EXT = {".py", ".conf", ".sql", ".sqlite", ".db", ".log", ".env", ".bak", ".ini", ".htaccess"}
 FORBIDDEN_FILES = {"server.py", "vhosts.conf", "composer.json", "Dockerfile", "docker-compose.yml"}
+FORBIDDEN_FILES_LOWER = {f.lower() for f in FORBIDDEN_FILES}
 SPARK_CHARS = " ▂▃▄▅▆▇█"
 
 # --- Stats & Global State ---
@@ -341,7 +366,7 @@ def system_stats_sampler():
         try:
             system_stats["cpu"] = psutil.cpu_percent(interval=None)
             system_stats["ram"] = psutil.virtual_memory().percent
-            system_stats["disk"] = psutil.disk_usage("/").percent
+            system_stats["disk"] = psutil.disk_usage(PROJECT_ROOT).percent
             now = time.time()
             req_timestamps[:] = [t for t in req_timestamps if now - t <= 1]
             system_stats["rps"] = len(req_timestamps)
@@ -359,6 +384,26 @@ def system_stats_sampler():
         except Exception as e:
             print(f"[ERROR STATS] {e}")
         time.sleep(0.5)
+
+# --- Windows path hardening ---
+# Windows opens "secret.db." or "secret.db " as secret.db, "file::$DATA" as file, "CON"/"NUL"/"COM1" as devices and
+# "PROGRA~1" as its long name, and it ignores case. Each of those would slip past the extension and file-name blocks,
+# so on Windows such requests are refused outright.
+WIN_RESERVED = {"con", "prn", "aux", "nul", "conin$", "conout$"} | {f"com{i}" for i in range(10)} | {f"lpt{i}" for i in range(10)}
+
+def windows_path_is_unsafe(url_path):
+    if ":" in url_path: return True
+    for part in re.split(r"[\\/]+", url_path):
+        if part in ("", ".", ".."): continue
+        if part[-1] in ". ": return True
+        if re.search(r"~\d", part): return True
+        if part.split(".")[0].strip().lower() in WIN_RESERVED: return True
+    return False
+
+def inside_site_root(full_path):
+    root = os.path.normcase(os.path.realpath(SITE_ROOT))
+    path = os.path.normcase(full_path)
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
 # --- .htaccess Helper ---
 def get_htaccess_rules():
@@ -381,7 +426,7 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     request_queue_size = 100 
 
 class HardenedPHPServer(BaseHTTPRequestHandler):
-    server_version = "IronGate/17.0"
+    server_version = f"IronGate/{VERSION}"
 
     def log_message(self, format, *args): pass
 
@@ -438,14 +483,16 @@ class HardenedPHPServer(BaseHTTPRequestHandler):
             url_parts = self.path.split("?", 1)
             url_path = url_parts[0]
             query_string = url_parts[1] if len(url_parts) > 1 else ""
+            if IS_WINDOWS and windows_path_is_unsafe(url_path):
+                self.send_error(403, "Access Denied"); status_code = 403; return
             full_path = os.path.realpath(os.path.join(SITE_ROOT, url_path.lstrip("/")))
 
-            if not full_path.startswith(os.path.realpath(SITE_ROOT)):
+            if not inside_site_root(full_path):
                 self.send_error(403); status_code = 403; return
             filename = os.path.basename(full_path)
             ext = os.path.splitext(full_path)[1].lower()
             is_blocked = False
-            if filename in FORBIDDEN_FILES or ext in FORBIDDEN_EXT: is_blocked = True
+            if filename.lower() in FORBIDDEN_FILES_LOWER or ext in FORBIDDEN_EXT: is_blocked = True
             else:
                 for pattern in htaccess_files:
                     if re.search(pattern, filename, re.I): is_blocked = True; break
@@ -462,7 +509,7 @@ class HardenedPHPServer(BaseHTTPRequestHandler):
 
             if not os.path.exists(full_path):
                 self.send_custom_404(); status_code = 404
-            elif full_path.endswith(".php"):
+            elif ext == ".php":   # also INDEX.PHP: on Windows that is the same file, and must never go out as source
                 status_code = int(self.run_php(full_path, url_path, query_string))
             else:
                 status_code = int(self.serve_static(full_path))
@@ -486,6 +533,7 @@ class HardenedPHPServer(BaseHTTPRequestHandler):
             
             log_entry = { "id": req_id, "time": datetime.now().strftime('%H:%M:%S'), "origin": origin, "ip": client_ip, "domain": host_domain, "path": url_path, "status": status_code, "ms": duration, "method": self.command, "ua": user_agent, "ref": referrer }
             log_buffer.append(log_entry)
+            if HEADLESS: print(f"{log_entry['time']} {status_code} {self.command} {client_ip} [{origin}] {host_domain}{url_path} {duration:.0f}ms", flush=True)
             if status_code != 403: stats["requests"] += 1; stats["last_origin"] = origin
 
     def run_php(self, script_path, url_path, query_string):
@@ -844,18 +892,31 @@ class ServerApp(App):
         else:
             self.notify("Can only delete from Vault", severity="warning")
 
+HEADLESS = False
+
 def start_server_thread():
     mimetypes.init()
     os.makedirs(SITE_ROOT, exist_ok=True)
     try:
         httpd = ThreadedHTTPServer(("0.0.0.0", PORT), HardenedPHPServer)
-        httpd.serve_forever()
-    except PermissionError:
-        print(f"\n[!] Port {PORT} denied. Falling back to 8080...")
+    except OSError as e:   # PermissionError on Linux/macOS; WinError 10013/10048 on Windows (blocked or in use)
+        print(f"\n[!] Port {PORT} unavailable ({e}). Falling back to 8080...", flush=True)
         httpd = ThreadedHTTPServer(("0.0.0.0", 8080), HardenedPHPServer)
-        httpd.serve_forever()
+    print(f"[*] IronGate listening on http://127.0.0.1:{httpd.server_address[1]}/  (web root: {SITE_ROOT})", flush=True)
+    httpd.serve_forever()
 
 if __name__ == "__main__":
-    threading.Thread(target=start_server_thread, daemon=True).start()
+    import argparse
+    ap = argparse.ArgumentParser(description="IronGate web server")
+    ap.add_argument("--port", type=int, help="port to listen on (default 80, falls back to 8080)")
+    ap.add_argument("--headless", action="store_true", help="no dashboard: print one line per request (services, scripts)")
+    args = ap.parse_args()
+    if args.port: PORT = args.port
+    HEADLESS = args.headless
     threading.Thread(target=system_stats_sampler, daemon=True).start()
-    ServerApp().run()
+    if HEADLESS:
+        try: start_server_thread()
+        except KeyboardInterrupt: print("\n[*] Shutting down.")
+    else:
+        threading.Thread(target=start_server_thread, daemon=True).start()
+        ServerApp().run()
